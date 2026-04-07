@@ -3,32 +3,38 @@ from cryptography.fernet import Fernet
 import websockets
 from zeroconf import Zeroconf, ServiceBrowser
 
+# Try to import PySide6 only if on Windows
+IS_WINDOWS = os.name == 'nt'
+if IS_WINDOWS:
+    from PySide6.QtWidgets import QApplication, QInputDialog
+    from PySide6.QtCore import QTimer
+
 CONFIG_FILE = "kip_client_config.json"
 
-# --- FAILSAFE LINUX CLIPBOARD FUNCTIONS ---
+# --- CROSS-PLATFORM CLIPBOARD ---
 def get_clipboard():
-    try:
-        # Try Wayland first (RPi 5 default)
-        return subprocess.check_output(['wl-paste', '-n'], text=True, stderr=subprocess.DEVNULL)
-    except:
-        try:
-            # Fallback to X11
-            return subprocess.check_output(['xclip', '-selection', 'clipboard', '-o'], text=True, stderr=subprocess.DEVNULL)
+    if IS_WINDOWS:
+        return QApplication.clipboard().text()
+    else:
+        try: # Try Wayland
+            return subprocess.check_output(['wl-paste', '-n'], text=True, stderr=subprocess.DEVNULL)
         except:
-            return ""
+            try: # Try X11
+                return subprocess.check_output(['xclip', '-selection', 'clipboard', '-o'], text=True, stderr=subprocess.DEVNULL)
+            except: return ""
 
 def set_clipboard(text):
-    try:
-        # Try Wayland
-        process = subprocess.Popen(['wl-copy'], stdin=subprocess.PIPE, text=True)
-        process.communicate(input=text)
-    except:
-        try:
-            # Fallback to X11
-            process = subprocess.Popen(['xclip', '-selection', 'clipboard'], stdin=subprocess.PIPE, text=True)
+    if IS_WINDOWS:
+        QApplication.clipboard().setText(text)
+    else:
+        try: # Try Wayland
+            process = subprocess.Popen(['wl-copy'], stdin=subprocess.PIPE, text=True)
             process.communicate(input=text)
         except:
-            print("[!] Failed to set clipboard. Is wl-clipboard installed?")
+            try: # Try X11
+                process = subprocess.Popen(['xclip', '-selection', 'clipboard'], stdin=subprocess.PIPE, text=True)
+                process.communicate(input=text)
+            except: print("[!] Error: No clipboard tool found (wl-copy/xclip)")
 
 class KipClient:
     def __init__(self):
@@ -41,9 +47,6 @@ class KipClient:
 
         # Start background discovery
         threading.Thread(target=self.discovery_worker, daemon=True).start()
-
-        # START THE CLIPBOARD MONITOR (Pure Python Loop)
-        threading.Thread(target=self.monitor_loop, daemon=True).start()
 
     def load_config(self):
         if os.path.exists(CONFIG_FILE):
@@ -68,7 +71,7 @@ class KipClient:
         
         if not self.config:
             print("\n!!! PAIRING REQUIRED !!!")
-            pin = input("Enter the 6-digit PIN from the Hub: ")
+            pin = input(f"Enter the PIN from Hub ({self.server_ip}): ")
             self.submit_pairing(pin)
         else:
             self.start_sync_engine()
@@ -89,6 +92,9 @@ class KipClient:
         self.loop = asyncio.new_event_loop()
         threading.Thread(target=self.loop.run_forever, daemon=True).start()
         asyncio.run_coroutine_threadsafe(self.ws_handler(), self.loop)
+        
+        # Start the monitoring loop
+        threading.Thread(target=self.monitor_loop, daemon=True).start()
 
     async def ws_handler(self):
         uri = f"ws://{self.server_ip}:8000/ws/{self.config['api_key']}"
@@ -96,17 +102,16 @@ class KipClient:
             try:
                 async with websockets.connect(uri) as ws:
                     self.ws_conn = ws
-                    print("[✔] Connected to Hub! Monitoring RPi Clipboard...")
+                    print(f"[✔] Connected to Hub! Kip is ACTIVE.")
                     while True:
                         msg = await ws.recv()
                         data = json.loads(msg)
                         raw_data = self.cipher.decrypt(data['data'].encode()).decode()
-                        print(f"\n[↓] Received from Hub: '{raw_data[:30]}...'")
+                        print(f"\n[↓] Remote Update: '{raw_data[:30]}...'")
                         self.last_local_hash = hashlib.sha256(raw_data.encode()).hexdigest()
                         set_clipboard(raw_data)
-            except Exception as e:
+            except Exception:
                 self.ws_conn = None
-                print(f"[!] Connection lost. Retrying in 5s...")
                 await asyncio.sleep(5)
 
     def monitor_loop(self):
@@ -117,17 +122,19 @@ class KipClient:
                     h = hashlib.sha256(text.encode()).hexdigest()
                     if h != self.last_local_hash:
                         self.last_local_hash = h
-                        print(f"\n[↑] RPi Copy Detected: '{text[:30]}...'")
-                        
+                        print(f"\n[↑] Local Copy: '{text[:30]}...'")
                         encrypted = self.cipher.encrypt(text.encode()).decode()
                         payload = json.dumps({"type": "text", "data": encrypted, "ts": time.time(), "hash": h})
                         asyncio.run_coroutine_threadsafe(self.ws_conn.send(payload), self.loop)
             time.sleep(1)
 
 if __name__ == "__main__":
-    client = KipClient()
-    # Keep the main thread alive
-    try:
-        while True: time.sleep(1)
-    except KeyboardInterrupt:
-        print("\nExiting...")
+    if IS_WINDOWS:
+        app = QApplication(sys.argv)
+        client = KipClient()
+        sys.exit(app.exec())
+    else:
+        client = KipClient()
+        try:
+            while True: time.sleep(1)
+        except KeyboardInterrupt: pass
