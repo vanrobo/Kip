@@ -176,28 +176,36 @@ def start_discovery():
     zc.register_service(info)
     return zc
 
-# --- MAIN EXECUTION ---
 if __name__ == "__main__":
-    # 1. Handle Admin Rights on Windows
-    if os.name == 'nt' and not is_admin():
-        print("Requesting Admin rights to configure firewall...")
-        run_as_admin()
-        sys.exit()
+    # 1. Attempt Firewall Setup (Optional)
+    if os.name == 'nt':
+        if is_admin():
+            setup_firewall()
+        else:
+            print("---")
+            print("NOTE: Not running as Admin. If sync fails, manually allow port 8000 in Firewall.")
+            print("To fix this automatically, right-click VS Code and 'Run as Administrator'.")
+            print("---")
 
-    # 2. Setup Firewall (Only runs if Admin)
-    setup_firewall()
+    # 2. Start Zeroconf Discovery
+    try:
+        discovery = start_discovery()
+    except Exception as e:
+        print(f"Zeroconf Error: {e}")
+        discovery = None
 
-    # 3. Start Zeroconf Discovery
-    discovery = start_discovery()
-
-    # 4. Start Backend Server in Thread
+    # 3. Start Backend Server in Thread
     def run_server():
-        uvicorn.run(app, host="0.0.0.0", port=8000, log_level="error")
+        print("Starting Hub Server on port 8000...")
+        try:
+            uvicorn.run(app, host="0.0.0.0", port=8000, log_level="info")
+        except Exception as e:
+            print(f"Server crashed: {e}")
 
     server_thread = threading.Thread(target=run_server, daemon=True)
     server_thread.start()
 
-    # 5. Launch GUI
+    # 4. Launch GUI
     qt_app = QApplication(sys.argv)
     window = KipHubUI()
     window.show()
@@ -205,4 +213,5 @@ if __name__ == "__main__":
     try:
         sys.exit(qt_app.exec())
     finally:
-        discovery.unregister_all_services()
+        if discovery:
+            discovery.unregister_all_services()
