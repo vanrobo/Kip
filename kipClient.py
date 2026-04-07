@@ -3,6 +3,7 @@ from PySide6.QtWidgets import QApplication, QSystemTrayIcon, QMenu, QInputDialog
 from PySide6.QtGui import QIcon
 from cryptography.fernet import Fernet
 import websockets
+import socket
 from zeroconf import Zeroconf, ServiceBrowser
 
 CONFIG_FILE = "kip_client_config.json"
